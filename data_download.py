@@ -21,12 +21,12 @@ def main():
 
     dataloader = get_dataloader()
 
-    batch = next(iter(dataloader))
-    batch_on_device = {k: v.to(device) for k, v in batch.items()}
+    # batch = next(iter(dataloader))
+    # batch_on_device = {k: v.to(device) for k, v in batch.items()}
 
-    print("Batch keys:", batch_on_device.keys())
-    print("Shape of input_ids:", batch_on_device["input_ids"].shape)
-    print("Device of input_ids:", batch_on_device["input_ids"].device)
+    # print("Batch keys:", batch_on_device.keys())
+    # print("Shape of input_ids:", batch_on_device["input_ids"].shape)
+    # print("Device of input_ids:", batch_on_device["input_ids"].device)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -47,24 +47,26 @@ def train(model, device, dataloader):
     train_losses = []
 
     for epoch in range(10):
+        epoch_loss = 0
+
         for i, batch in enumerate(dataloader):
-            if device == "cuda":
-                batch_on_device = {k: v.to(device) for k, v in batch.items()}
-                model.cuda()
-            else:
-                model.cpu()
+            batch = {k: v.to(device) for k, v in batch.items()}
 
             optimizer.zero_grad()
 
             outputs = model(**batch)
             loss = outputs.loss
-
+            
+            loss.backward()
             optimizer.step()
 
             epoch_loss += loss.item()
 
-            # if i % 10 == 0:
-            print(f"Epoch: {epoch}, Batch: {i}, Loss: {loss.item():.4f}")
+            if i % 10 == 0:
+                print(f"Epoch: {epoch}, Batch: {i}, Loss: {loss.item():.4f}")
+
+            del outputs, loss
+            torch.cuda.empty_cache()
 
         avg_loss = epoch_loss / len(dataloader)
         train_losses.append(avg_loss)
@@ -76,7 +78,7 @@ def train(model, device, dataloader):
 def get_dataloader():
     ds = load_dataset(dataset_name, split="train_sft")
 
-    ds = ds.select(range(50))
+    # ds = ds.select(range(50))
 
     # print(ds[0])
 
@@ -106,7 +108,7 @@ def get_dataloader():
         labels = input_ids.copy()
         labels[:len(prompt_ids)] = [-100] * len(prompt_ids)
 
-        print(labels)
+        # print(labels)
 
         return {
             "input_ids": input_ids,
@@ -117,7 +119,7 @@ def get_dataloader():
     preprocessed_ds = ds.map(preprocess)
     preprocessed_ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
 
-    print(preprocessed_ds[0])
+    # print(preprocessed_ds[0[]])
 
     # data_collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors="pt")
     # data_collator = DataCollatorForLanguageModeling(
@@ -184,7 +186,7 @@ def get_dataloader():
 
     dataloader = torch.utils.data.DataLoader(
         preprocessed_ds,
-        batch_size=16,
+        batch_size=1,
         collate_fn=collate_fn
     )
 
