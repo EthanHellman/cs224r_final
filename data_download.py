@@ -5,6 +5,11 @@ from datasets import load_dataset
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import DataCollatorForLanguageModeling
+from transformers import get_linear_schedule_with_warmup
+import math
+
+import nltk
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 import torch
 import torch.nn as nn
@@ -15,6 +20,11 @@ import wandb
 import argparse
 import json
 import os
+
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
 
 # model_name = "Qwen/Qwen2.5-0.5B"
 # dataset_name = "HuggingFaceH4/ultrafeedback_binarized"
@@ -32,6 +42,7 @@ def main():
             "dataset": args.dataset_name,
             "epochs": args.num_epochs,
             "batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "seed": args.seed
         }
     )
@@ -63,9 +74,17 @@ def main():
 
     model.gradient_checkpointing_enable()
 
-    train(args, model, device, train_dataloader, validation_dataloader, run)
+    train(args, model, tokenizer, device, train_dataloader, validation_dataloader, run)
 
     samples = evaluate_feedback(args, model, tokenizer, device, run)
+
+    bleu_scores = calculate_bleu_score(samples)
+
+    print(f"BLEU-1: {bleu_scores['bleu_1']:.4f}")
+    print(f"BLEU-2: {bleu_scores['bleu_2']:.4f}")
+    print(f"BLEU-4: {bleu_scores['bleu_4']:.4f}")
+
+    run.log(bleu_scores)
 
     with open("sft_samples.json", "w") as f:
         json.dump(samples, f, indent=2)
@@ -74,54 +93,151 @@ def main():
 
     run.finish()
 
-def train(args, model, device, train_dataloader, validation_dataloader, run):
+def train(args, model, tokenizer, device, train_dataloader, validation_dataloader, run):
     print("Training")
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    model.train()
+    gradient_accumulation_steps = args.gradient_accumulation_steps
     
+    num_training_steps = args.num_epochs * len(train_dataloader) // gradient_accumulation_steps
+    num_warmup_steps = int(0.1 * num_training_steps)
+
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps
+    )
+
+    model.train()
     train_losses = []
+
+    best_val_loss = float('inf')
+    patience = 2
+    patience_counter = 0
     
     for epoch in range(args.num_epochs):
         model.train()
-
         epoch_loss = 0
+        optimizer.zero_grad()
+
         for i, batch in enumerate(train_dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
-            optimizer.zero_grad()
-            
-            # Use autocast without GradScaler for bfloat16
+
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                 outputs = model(**batch)
-                loss = outputs.loss
+                loss = outputs.loss / gradient_accumulation_steps
             
             loss.backward()
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-            if i % 10 == 0:
-                print(f"Epoch: {epoch}, Batch: {i}, Loss: {loss.item():.4f}")
 
-            run.log({"loss": loss.item()})
+            # print(f"Step: {i}, Loss: {loss.item():.4f}")
+
+            if i % 10 == 0:
+                curr_lr = scheduler.get_last_lr()[0]
+                actual_loss = loss.item() * gradient_accumulation_steps
+
+                print(f"Epoch: {epoch}, Batch: {i}, Loss: {actual_loss:.4f}, Current LR: {curr_lr:.2e}")
+
+                run.log({
+                    "loss": actual_loss, 
+                    "learning_rate": curr_lr,
+                    # "gradient_norm": total_norm
+                })
+
+
+            if (i + 1) % gradient_accumulation_steps == 0:
+                # print("Accumulating")
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_norm = 0
+
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+
+                run.log({
+                    "gradient_norm": total_norm
+                })
+
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                
+
+            epoch_loss += loss.item() * gradient_accumulation_steps
             
             del outputs, loss
             if i % 50 == 0:
                 torch.cuda.empty_cache()
+
+        if len(train_dataloader) % gradient_accumulation_steps != 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
             
         avg_loss = epoch_loss / len(train_dataloader)
-        run.log({"avg_loss": avg_loss})
+        # run.log({"avg_loss": avg_loss})
 
         train_losses.append(avg_loss)
         print(f"Epoch: {epoch}, Average Loss: {avg_loss}")
 
-        val_loss = validate(model, device, validation_dataloader, run)
+        val_loss, perplexity = validate(model, device, validation_dataloader)
 
-        print(f"Epoch: {epoch}, Validation Loss: {val_loss}")
+        run.log({
+            "avg_train_loss": avg_loss,
+            "val_loss": val_loss,
+            "val_perplexity": perplexity
+        })
+
+        print(f"Epoch: {epoch}, Validation Loss: {val_loss}, Validation Perplexity: {perplexity}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            save_checkpoint(model, tokenizer, epoch=f"best_epoch_{epoch}")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch}")
+                break
     
+    if patience_counter > 0:
+        print(f"Best model saved at checkpoint: best_epoch_{epoch - patience_counter}")
+    else:
+        print(f"Best model saved at checkpoint: best_epoch_{epoch}")
+
     return train_losses
 
-def validate(model, device, dataloader, run):
+def calculate_perplexity(model, dataloader, device):
     model.eval()
     total_loss = 0
+    total_tokens = 0
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            
+            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+                outputs = model(**batch)
+                loss = outputs.loss
+            
+            # Count only non-padded tokens
+            labels = batch["labels"]
+            num_tokens = (labels != -100).sum().item()
+            
+            total_loss += loss.item() * num_tokens
+            total_tokens += num_tokens
+    
+    avg_loss = total_loss / total_tokens
+    perplexity = math.exp(avg_loss)
+    
+    return perplexity
+
+def validate(model, device, dataloader):
+    model.eval()
+    total_loss = 0
+
+    perplexity = calculate_perplexity(model, dataloader, device)
 
     with torch.no_grad():
         for batch in dataloader:
@@ -134,8 +250,12 @@ def validate(model, device, dataloader, run):
             total_loss += loss.item()
 
     val_loss = total_loss / len(dataloader)
-    run.log({"val_loss": val_loss})
-    return val_loss
+    # run.log({
+    #     "val_loss": val_loss,
+    #     "val_perplexity": perplexity
+    # })
+
+    return val_loss, perplexity
 
 def generate_samples(model, tokenizer, prompts, device, max_length=350):
     model.eval()
@@ -151,6 +271,8 @@ def generate_samples(model, tokenizer, prompts, device, max_length=350):
         inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
+        input_length = inputs["input_ids"].shape[1]
+
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -161,8 +283,8 @@ def generate_samples(model, tokenizer, prompts, device, max_length=350):
             )
         
         # print("length of outputs: ", len(outputs))
-
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_tokens = outputs[0][input_length:]
+        generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
         # print(generated_text)
 
         samples.append({
@@ -200,6 +322,39 @@ def save_checkpoint(model, tokenizer, epoch, checkpoint_dir="./checkpoints"):
     model.save_pretrained(checkpoint_path)
     tokenizer.save_pretrained(checkpoint_path)
     print(f"Checkpoint saved to: {checkpoint_path}")
+
+def calculate_bleu_score(generations):
+    bleu_1_scores = []
+    bleu_2_scores = []
+    bleu_4_scores = []
+    smoother = SmoothingFunction()
+    
+    for gen in generations:
+        reference = gen["chosen"].split()
+        hypothesis = gen["response"].split()
+        
+        # BLEU-1 (unigram)
+        bleu_1 = sentence_bleu([reference], hypothesis, 
+                               weights=(1.0, 0, 0, 0),
+                               smoothing_function=smoother.method1)
+        bleu_1_scores.append(bleu_1)
+        
+        # BLEU-2 (unigram + bigram)
+        bleu_2 = sentence_bleu([reference], hypothesis, 
+                               weights=(0.5, 0.5, 0, 0),
+                               smoothing_function=smoother.method1)
+        bleu_2_scores.append(bleu_2)
+        
+        # BLEU-4 (standard)
+        bleu_4 = sentence_bleu([reference], hypothesis,
+                               smoothing_function=smoother.method1)
+        bleu_4_scores.append(bleu_4)
+    
+    return {
+        'bleu_1': sum(bleu_1_scores) / len(bleu_1_scores),
+        'bleu_2': sum(bleu_2_scores) / len(bleu_2_scores),
+        'bleu_4': sum(bleu_4_scores) / len(bleu_4_scores)
+    }
 
 def get_dataloader(args, split):
     dataset_name = args.dataset_name
@@ -288,7 +443,8 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-0.5B")
     parser.add_argument("--dataset_name", type=str, default="HuggingFaceH4/ultrafeedback_binarized")
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--seed", type=int, default=16)
     return parser.parse_args()
