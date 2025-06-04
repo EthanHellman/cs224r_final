@@ -29,9 +29,10 @@ def format_prompts(prompts, tokenizer):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/sft_epoch_10")
+    # parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/sft_epoch_10")
+    parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/dpo_best_epoch_2")
     parser.add_argument("--test_file", type=str, default="ultrafeedback.jsonl")
-    parser.add_argument("--output_file", type=str, default="ultrafeedback_submission_vllm.jsonl")
+    parser.add_argument("--output_file", type=str, default="ultrafeedback_submission_vllm_dpo.json")
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.9)
