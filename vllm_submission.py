@@ -30,9 +30,9 @@ def format_prompts(prompts, tokenizer):
 def main():
     parser = argparse.ArgumentParser()
     # parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/sft_epoch_10")
-    parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/dpo_best_epoch_2")
+    parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/rloo_best_epoch_0")
     parser.add_argument("--test_file", type=str, default="ultrafeedback.jsonl")
-    parser.add_argument("--output_file", type=str, default="ultrafeedback_submission_vllm_dpo.json")
+    parser.add_argument("--output_file", type=str, default="ultrafeedback_submission_vllm_rloo.json")
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_p", type=float, default=0.9)
@@ -61,11 +61,20 @@ def main():
     
     # Initialize VLLM
     print(f"Initializing VLLM with model from {args.checkpoint_path}")
+    # llm = LLM(
+    #     model=args.checkpoint_path,
+    #     tensor_parallel_size=args.tensor_parallel_size,
+    #     max_model_len=1280,  # 256 prompt + 1024 response
+    #     dtype="float16"
+    # )
+
     llm = LLM(
         model=args.checkpoint_path,
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=1280,  # 256 prompt + 1024 response
-        dtype="float16"
+        dtype="float16",
+        disable_custom_all_reduce=True,  # This can help with some issues
+        enforce_eager=True  # This disables torch.compile
     )
     
     # Set sampling parameters
