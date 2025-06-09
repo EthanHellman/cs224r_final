@@ -1,6 +1,7 @@
 import json
 import argparse
 from vllm import LLM, SamplingParams
+from vllm.sampling_params import BeamSearchParams
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
@@ -13,7 +14,7 @@ def load_test_prompts(dataset_name, num_samples=200):
     """Load test prompts from ultrafeedback dataset"""
     ds = load_dataset(dataset_name, split="train_prefs")
     # Select a subset for evaluation
-    ds = ds.select(range(12000, 12000 + num_samples))
+    ds = ds.select(range(14000, 14000 + num_samples))
     
     prompts = []
     for example in ds:
@@ -34,25 +35,109 @@ def format_prompts_for_generation(prompts, tokenizer):
         formatted_prompts.append(formatted)
     return formatted_prompts
 
-def generate_responses(model_path, prompts, formatted_prompts, max_tokens=512, chunk_size=20):
-    """Generate responses using VLLM for efficiency"""
+# def generate_responses(model_path, prompts, formatted_prompts, max_tokens=512, chunk_size=20):
+#     """Generate responses using VLLM for efficiency"""
+#     print(f"Loading model from {model_path}")
+    
+#     # Initialize VLLM with memory constraints
+#     llm = LLM(
+#         model=model_path,
+#         tensor_parallel_size=1,
+#         max_model_len=2048,  # Increased to handle longer prompts
+#         dtype="float16",
+#         max_num_seqs=chunk_size,  # Limit concurrent sequences
+#         gpu_memory_utilization=0.8  # Use only 80% of GPU memory
+#     )
+
+#     beam_params = BeamSearchParams(
+#         beam_width=4,  # Number of beams to track
+#         max_tokens=max_tokens,
+#         length_penalty=0.6,  # Values < 1.0 penalize longer sequences
+#         temperature=0.7  # Some temperature for diversity
+#     )
+    
+#     # Create sampling parameters with beam search
+#     sampling_params = SamplingParams(
+#         temperature=0.7,
+#         top_p=0.9,
+#         repetition_penalty=1.2,  # Values > 1.0 penalize repetition
+#         frequency_penalty=0.3,   # Penalizes repeated tokens based on frequency
+#         presence_penalty=0.3,     # Penalizes any token repetition
+#         beam_search_params=beam_params  # This might be the correct way to add beam search
+#     )
+    
+#     # Set sampling parameters
+#     # sampling_params = SamplingParams(
+#     #     temperature=0.7,
+#     #     top_p=0.9,
+#     #     max_tokens=max_tokens,
+#     # )
+
+#     # sampling_params = SamplingParams(
+#     #     temperature=0.7,
+#     #     top_p=0.9,
+#     #     max_tokens=256,          # Reduced from 512
+#     #     repetition_penalty=1.2,  # Values > 1.0 penalize repetition
+#     #     frequency_penalty=0.3,   # Penalizes repeated tokens based on frequency
+#     #     presence_penalty=0.3     # Penalizes any token repetition
+#     # )
+    
+#     # Generate responses in chunks
+#     responses = []
+#     print(f"Generating responses in chunks of {chunk_size}...")
+    
+#     for chunk_start in range(0, len(prompts), chunk_size):
+#         chunk_end = min(chunk_start + chunk_size, len(prompts))
+#         chunk_prompts = prompts[chunk_start:chunk_end]
+#         chunk_formatted = formatted_prompts[chunk_start:chunk_end]
+        
+#         print(f"Processing chunk {chunk_start//chunk_size + 1}/{(len(prompts) + chunk_size - 1)//chunk_size}")
+        
+#         try:
+#             # Generate for this chunk
+#             outputs = llm.generate(chunk_formatted, sampling_params)
+            
+#             # Extract responses
+#             for i, output in enumerate(outputs):
+#                 generated_text = output.outputs[0].text
+#                 responses.append({
+#                     "prompt": chunk_prompts[i],
+#                     "response": generated_text
+#                 })
+#         except Exception as e:
+#             print(f"Error processing chunk: {e}")
+#             # Add empty responses for failed prompts
+#             for prompt in chunk_prompts:
+#                 responses.append({
+#                     "prompt": prompt,
+#                     "response": "[Generation failed]"
+#                 })
+    
+#     return responses
+
+def generate_responses(model_path, prompts, formatted_prompts, max_tokens=256, chunk_size=20):
+    """Generate responses using VLLM beam search with length penalty"""
     print(f"Loading model from {model_path}")
     
-    # Initialize VLLM with memory constraints
+    # Initialize VLLM
     llm = LLM(
         model=model_path,
         tensor_parallel_size=1,
-        max_model_len=2048,  # Increased to handle longer prompts
+        max_model_len=2048,
         dtype="float16",
-        max_num_seqs=chunk_size,  # Limit concurrent sequences
-        gpu_memory_utilization=0.8  # Use only 80% of GPU memory
+        max_num_seqs=chunk_size,
+        gpu_memory_utilization=0.8
     )
     
-    # Set sampling parameters
-    sampling_params = SamplingParams(
-        temperature=0.7,
-        top_p=0.9,
+    # Import BeamSearchParams
+    from vllm.sampling_params import BeamSearchParams
+    
+    # Create beam search parameters with length penalty
+    beam_params = BeamSearchParams(
+        beam_width=4,  # Number of beams to track
         max_tokens=max_tokens,
+        length_penalty=0.3,  # Values < 1.0 penalize longer sequences
+        temperature=0.9  # Some temperature for diversity
     )
     
     # Generate responses in chunks
@@ -67,12 +152,19 @@ def generate_responses(model_path, prompts, formatted_prompts, max_tokens=512, c
         print(f"Processing chunk {chunk_start//chunk_size + 1}/{(len(prompts) + chunk_size - 1)//chunk_size}")
         
         try:
-            # Generate for this chunk
-            outputs = llm.generate(chunk_formatted, sampling_params)
+            # Convert prompts to required format for beam search
+            beam_search_prompts = []
+            for i, prompt in enumerate(chunk_formatted):
+                # Need to use TextPrompt format for beam_search
+                beam_search_prompts.append({"prompt": prompt})
             
-            # Extract responses
+            # Use beam_search directly
+            outputs = llm.beam_search(beam_search_prompts, beam_params)
+            
+            # Extract responses (use the top beam for each prompt)
             for i, output in enumerate(outputs):
-                generated_text = output.outputs[0].text
+                best_beam = output.sequences[0]  # First beam is the best one
+                generated_text = best_beam.text
                 responses.append({
                     "prompt": chunk_prompts[i],
                     "response": generated_text
@@ -163,7 +255,9 @@ def evaluate_models(trained_responses, reference_responses, api_key):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trained_model_path", type=str,
-                        default="./checkpoints/rloo_best_epoch_0",
+                        default="./checkpoints/sft_final_early_stop_step_5000",
+                        # default="./checkpoints/final",
+                        # default="Qwen/Qwen2.5-0.5B-Instruct",
                         help="Path to your trained model checkpoint")
     parser.add_argument("--reference_model", type=str, 
                         default="Qwen/Qwen2.5-0.5B-Instruct",

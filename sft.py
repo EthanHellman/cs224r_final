@@ -277,7 +277,7 @@ def generate_samples(model, tokenizer, prompts, device, max_length=350):
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_length,
-                temperature=0.7,
+                temperature=0.9,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id
             )

@@ -114,14 +114,14 @@ def score_with_nemotron(prompt, response, client):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_samples", type=int, default=50)
-    parser.add_argument("--output_file", type=str, default="model_comparison_results.json")
+    parser.add_argument("--output_file", type=str, default="model_comparison_results_2.json")
     parser.add_argument("--api_key", type=str, required=True, help="NVIDIA API key for Nemotron")
     args = parser.parse_args()
     
     # Define model paths
     model_configs = [
         {
-            "path": "/home/ec2-user/cs224r_final/checkpoints/sft_epoch_best_epoch_1",
+            "path": "/home/ec2-user/cs224r_final/checkpoints/sft_final_early_stop_step_5000",
             "name": "SFT",
             "key": "sft_response"
         },
