@@ -12,6 +12,8 @@ def load_test_prompts(file_path):
             data = json.loads(line)
             if data.get("prompt"):
                 prompts.append(data["prompt"])
+
+    print(f"File is this long: {len(prompts)}")
     return prompts
 
 def format_prompts(prompts, tokenizer):
@@ -30,12 +32,12 @@ def format_prompts(prompts, tokenizer):
 def main():
     parser = argparse.ArgumentParser()
     # parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/sft_epoch_10")
-    parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/sft_final_early_stop_step_5000")
-    parser.add_argument("--test_file", type=str, default="ultrafeedback.jsonl")
-    parser.add_argument("--output_file", type=str, default="ultrafeedback_submission_vllm_sft2.json")
+    parser.add_argument("--checkpoint_path", type=str, default="./checkpoints/final")
+    parser.add_argument("--test_file", type=str, default="final_prompts.json")
+    parser.add_argument("--output_file", type=str, default="final_prompts_submission.json")
     parser.add_argument("--max_tokens", type=int, default=1024)
-    parser.add_argument("--temperature", type=float, default=0.9)
-    parser.add_argument("--top_p", type=float, default=0.9)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=None)
     args = parser.parse_args()
